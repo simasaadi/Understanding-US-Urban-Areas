@@ -5,7 +5,7 @@ import plotly.express as px
 import pydeck as pdk
 
 # -----------------------------
-# Page config
+# Page setup
 # -----------------------------
 st.set_page_config(
     page_title="Understanding US Urban Areas",
@@ -13,131 +13,87 @@ st.set_page_config(
     layout="wide"
 )
 
-# -----------------------------
-# Constants
-# -----------------------------
 DATA_PATH = "data/Urban_Areas.csv"
 
 SIZE_BINS = [-np.inf, 50, 500, 2000, np.inf]
-SIZE_LABELS = ["Small (<50 km²)", "Medium (50–500 km²)", "Large (500–2000 km²)", "Mega (>2000 km²)"]
+SIZE_LABELS = [
+    "Small (<50 km²)",
+    "Medium (50–500 km²)",
+    "Large (500–2000 km²)",
+    "Mega (>2000 km²)"
+]
 
-# A basemap that is light but not washed out
-MAP_STYLE = "mapbox://styles/mapbox/light-v10"  # if you want slightly darker: "mapbox://styles/mapbox/streets-v12"
+SIZE_COLORS = {
+    "Small (<50 km²)": [198, 219, 239, 180],
+    "Medium (50–500 km²)": [158, 202, 225, 180],
+    "Large (500–2000 km²)": [107, 174, 214, 200],
+    "Mega (>2000 km²)": [33, 113, 181, 220],
+}
 
+MAP_STYLE = "mapbox://styles/mapbox/dark-v11"
 
 # -----------------------------
-# Load + prepare data
+# Load data
 # -----------------------------
-@st.cache_data(show_spinner=False)
-def load_data(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path)
-    df.columns = df.columns.str.upper().str.strip()
+@st.cache_data
+def load_data():
+    df = pd.read_csv(DATA_PATH)
+    df.columns = df.columns.str.upper()
 
-    # Required columns check (fail loudly, not silently)
-    required = {"NAME10", "UACE10", "FUNCSTAT10", "ALAND10", "AWATER10", "INTPTLAT10", "INTPTLON10"}
-    missing = required - set(df.columns)
-    if missing:
-        raise ValueError(f"Dataset is missing required columns: {sorted(missing)}")
+    df["ALAND10"] = pd.to_numeric(df["ALAND10"], errors="coerce")
+    df["AWATER10"] = pd.to_numeric(df["AWATER10"], errors="coerce")
 
-    # Coerce numerics
-    for c in ["ALAND10", "AWATER10", "INTPTLAT10", "INTPTLON10"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna(subset=["INTPTLAT10", "INTPTLON10", "ALAND10", "AWATER10"])
 
-    # Drop unusable rows
-    df = df.dropna(subset=["INTPTLAT10", "INTPTLON10", "ALAND10", "AWATER10"]).copy()
-
-    # Derived metrics (m² -> km²)
     df["LAND_KM2"] = df["ALAND10"] / 1_000_000
     df["WATER_KM2"] = df["AWATER10"] / 1_000_000
     df["TOTAL_AREA_KM2"] = df["LAND_KM2"] + df["WATER_KM2"]
 
-    df["WATER_SHARE_PCT"] = np.where(
-        df["TOTAL_AREA_KM2"] > 0,
-        (df["WATER_KM2"] / df["TOTAL_AREA_KM2"]) * 100,
-        np.nan
+    df["WATER_SHARE_PCT"] = (df["WATER_KM2"] / df["TOTAL_AREA_KM2"]) * 100
+
+    df["UACE10"] = df["UACE10"].astype(str).str.zfill(5)
+    df["URBAN_TYPE"] = np.where(
+        df["UACE10"].str.startswith("9"),
+        "Urban Cluster (UC)",
+        "Urbanized Area (UA)"
     )
 
-    # UA vs UC (defensive: treat UACE10 as string)
-    df["UACE10"] = df["UACE10"].astype(str).str.zfill(5)
-    df["URBAN_TYPE"] = np.where(df["UACE10"].str.startswith("9"), "Urban Cluster (UC)", "Urbanized Area (UA)")
+    df["SIZE_CLASS"] = pd.cut(df["LAND_KM2"], SIZE_BINS, labels=SIZE_LABELS)
 
-    # Size typology
-    df["SIZE_CLASS"] = pd.cut(df["LAND_KM2"], bins=SIZE_BINS, labels=SIZE_LABELS)
-
-    # Outliers: top 1% by LAND_KM2
     p99 = df["LAND_KM2"].quantile(0.99)
-    df["IS_OUTLIER_TOP1PCT"] = df["LAND_KM2"] >= p99
-    df["OUTLIER_THRESHOLD_KM2"] = p99  # for display
+    df["IS_OUTLIER"] = df["LAND_KM2"] >= p99
 
-    return df
+    return df, p99
 
 
-df = load_data(DATA_PATH)
+df, p99 = load_data()
 
 # -----------------------------
 # Sidebar
 # -----------------------------
 st.sidebar.title("Filters")
 
-urban_type_filter = st.sidebar.multiselect(
+urban_type = st.sidebar.multiselect(
     "Urban Area Type",
-    options=sorted(df["URBAN_TYPE"].unique()),
-    default=sorted(df["URBAN_TYPE"].unique())
+    df["URBAN_TYPE"].unique(),
+    default=df["URBAN_TYPE"].unique()
 )
 
-funcstat_filter = st.sidebar.multiselect(
-    "Functional Status (FUNCSTAT10)",
-    options=sorted(df["FUNCSTAT10"].dropna().unique()),
-    default=sorted(df["FUNCSTAT10"].dropna().unique())
+size_class = st.sidebar.multiselect(
+    "Size Class",
+    SIZE_LABELS,
+    default=SIZE_LABELS
 )
 
-size_class_filter = st.sidebar.multiselect(
-    "Size Class (Land Area)",
-    options=[c for c in SIZE_LABELS if c in df["SIZE_CLASS"].astype(str).unique()],
-    default=[c for c in SIZE_LABELS if c in df["SIZE_CLASS"].astype(str).unique()]
-)
+show_outliers = st.sidebar.toggle("Show only extreme-scale urban areas (top 1%)")
 
-min_land = st.sidebar.slider(
-    "Minimum land area (km²)",
-    min_value=0.0,
-    max_value=float(np.nanmax(df["LAND_KM2"])),
-    value=0.0
-)
-
-show_only_outliers = st.sidebar.toggle(
-    "Show only outliers (top 1% land area)",
-    value=False
-)
-
-# Map controls
-st.sidebar.subheader("Map settings")
-map_mode = st.sidebar.radio(
-    "Map layer",
-    options=["Hex density (recommended)", "Points (outliers only)"],
-    index=0
-)
-
-hex_radius = st.sidebar.slider(
-    "Hex radius (meters)",
-    min_value=30000,
-    max_value=120000,
-    value=60000,
-    step=10000,
-    help="Bigger radius = smoother pattern; smaller = more detail."
-)
-
-# -----------------------------
-# Apply filters
-# -----------------------------
 filtered = df[
-    (df["URBAN_TYPE"].isin(urban_type_filter)) &
-    (df["FUNCSTAT10"].isin(funcstat_filter)) &
-    (df["SIZE_CLASS"].astype(str).isin(size_class_filter)) &
-    (df["LAND_KM2"] >= min_land)
-].copy()
+    df["URBAN_TYPE"].isin(urban_type) &
+    df["SIZE_CLASS"].isin(size_class)
+]
 
-if show_only_outliers:
-    filtered = filtered[filtered["IS_OUTLIER_TOP1PCT"]].copy()
+if show_outliers:
+    filtered = filtered[filtered["IS_OUTLIER"]]
 
 # -----------------------------
 # Header
@@ -145,315 +101,161 @@ if show_only_outliers:
 st.title("Understanding US Urban Areas")
 st.markdown(
     """
-    This dashboard explores Census-defined **Urbanized Areas (UAs)** and **Urban Clusters (UCs)** using land/water area
-    and interior-point coordinates. Key emphasis: **scale typology**, **UA vs UC contrasts**, and **outlier identification**.
+    **Visual analytics of Census-defined urban areas**, focusing on scale, spatial structure,
+    and the dominance of a small number of extremely large urban footprints.
     """
 )
 
 # -----------------------------
 # KPIs
 # -----------------------------
-k1, k2, k3, k4, k5 = st.columns(5)
+c1, c2, c3, c4 = st.columns(4)
 
-k1.metric("Urban Areas", f"{len(filtered):,}")
-
-k2.metric("Total Land (km²)", f"{filtered['LAND_KM2'].sum():,.0f}")
-k3.metric("Total Water (km²)", f"{filtered['WATER_KM2'].sum():,.0f}")
-k4.metric("Avg Water Share (%)", f"{filtered['WATER_SHARE_PCT'].mean():.1f}")
-
-# show threshold even when not toggled (this is a real analytic signal)
-p99 = df["LAND_KM2"].quantile(0.99)
-k5.metric("Outlier threshold (top 1%)", f"{p99:,.0f} km²")
+c1.metric("Urban Areas", f"{len(filtered):,}")
+c2.metric("Total Land (km²)", f"{filtered['LAND_KM2'].sum():,.0f}")
+c3.metric("Avg. Urban Size (km²)", f"{filtered['LAND_KM2'].mean():.1f}")
+c4.metric("Outlier Threshold (km²)", f"{p99:,.0f}")
 
 # -----------------------------
-# Section 1: Map (fixed)
+# MAP — size-class dominant hexes
 # -----------------------------
-st.subheader("Spatial Patterns")
-st.caption(
-    "The default map uses a hexagon density layer to avoid unreadable point clouds. "
-    "Switch to points to inspect outliers."
+st.subheader("Spatial Structure of Urban Scale")
+st.caption("Hexagons are colored by the **dominant urban size class** within each cell.")
+
+filtered["COLOR"] = filtered["SIZE_CLASS"].map(SIZE_COLORS)
+
+hex_layer = pdk.Layer(
+    "HexagonLayer",
+    data=filtered,
+    get_position=["INTPTLON10", "INTPTLAT10"],
+    radius=70000,
+    coverage=0.95,
+    extruded=False,
+    pickable=True,
+    get_fill_color="COLOR"
 )
 
-# Base view (continental US)
-view_state = pdk.ViewState(latitude=39.5, longitude=-98.35, zoom=3.5)
-
-layers = []
-
-if map_mode == "Hex density (recommended)":
-    # Use hexagon aggregation; weight by LAND_KM2 to show "where large urban footprint concentrates"
-    hex_layer = pdk.Layer(
-        "HexagonLayer",
-        data=filtered,
-        get_position=["INTPTLON10", "INTPTLAT10"],
-        radius=hex_radius,
-        elevation_scale=30,
-        elevation_range=[0, 3000],
-        extruded=True,
-        coverage=0.9,
-        pickable=True,
-        # This is key: show not just counts, but weighted land area signal
-        get_weight="LAND_KM2"
-    )
-    layers.append(hex_layer)
-
-    deck = pdk.Deck(
+st.pydeck_chart(
+    pdk.Deck(
         map_style=MAP_STYLE,
-        initial_view_state=view_state,
-        layers=layers,
-        tooltip={
-            "html": "<b>Hex cell</b><br/>Aggregated land-area signal (weighted)<br/>Zoom in for more detail.",
-            "style": {"color": "black"}
-        }
-    )
-    st.pydeck_chart(deck, use_container_width=True)
-
-else:
-    # Points only makes sense when limited; enforce outliers for clarity
-    outliers = filtered[filtered["IS_OUTLIER_TOP1PCT"]].copy()
-    if outliers.empty:
-        st.info("No outliers in the current filter selection. Turn off 'Show only outliers' or broaden filters.")
-    else:
-        # Color by size class using RGBA arrays
-        color_map = {
-            "Small (<50 km²)": [49, 130, 189, 160],
-            "Medium (50–500 km²)": [107, 174, 214, 160],
-            "Large (500–2000 km²)": [239, 138, 98, 170],
-            "Mega (>2000 km²)": [203, 24, 29, 190],
-        }
-        outliers["COLOR"] = outliers["SIZE_CLASS"].astype(str).map(color_map).fillna([0, 0, 0, 140])
-
-        point_layer = pdk.Layer(
-            "ScatterplotLayer",
-            data=outliers,
-            get_position=["INTPTLON10", "INTPTLAT10"],
-            get_fill_color="COLOR",
-            get_radius=60000,
-            pickable=True,
-            stroked=True,
-            get_line_color=[0, 0, 0, 120],
-            line_width_min_pixels=1
-        )
-        st.pydeck_chart(
-            pdk.Deck(
-                map_style=MAP_STYLE,
-                initial_view_state=view_state,
-                layers=[point_layer],
-                tooltip={
-                    "html": (
-                        "<b>{NAME10}</b><br/>"
-                        "{URBAN_TYPE}<br/>"
-                        "Land: {LAND_KM2:.1f} km²<br/>"
-                        "Water: {WATER_KM2:.1f} km²<br/>"
-                        "Water share: {WATER_SHARE_PCT:.1f}%<br/>"
-                        "<i>{SIZE_CLASS}</i>"
-                    ),
-                    "style": {"color": "black"}
-                }
-            ),
-            use_container_width=True
-        )
+        layers=[hex_layer],
+        initial_view_state=pdk.ViewState(latitude=39.5, longitude=-98.35, zoom=3.6),
+        tooltip={"html": "Urban scale concentration"}
+    ),
+    use_container_width=True
+)
 
 # -----------------------------
-# Section 2: Size typology (bins + bar chart)
+# SIZE TYPOLOGY — ordered + cumulative
 # -----------------------------
 st.subheader("Urban Size Typology")
-left, right = st.columns([1, 1])
 
 size_counts = (
     filtered["SIZE_CLASS"]
-    .astype(str)
     .value_counts()
     .reindex(SIZE_LABELS)
-    .dropna()
     .reset_index()
 )
-size_counts.columns = ["SIZE_CLASS", "COUNT"]
+size_counts.columns = ["Size Class", "Count"]
+size_counts["Share (%)"] = size_counts["Count"] / size_counts["Count"].sum() * 100
+size_counts["Cumulative Share (%)"] = size_counts["Share (%)"].cumsum()
+
+left, right = st.columns([1, 1])
 
 with left:
-    fig_typology = px.bar(
+    fig_bar = px.bar(
         size_counts,
-        x="SIZE_CLASS",
-        y="COUNT",
-        title="Count of Urban Areas by Size Class (Land Area)",
-        labels={"SIZE_CLASS": "Size class", "COUNT": "Urban areas"}
+        x="Size Class",
+        y="Count",
+        title="Urban Areas by Size Class",
+        text="Count"
     )
-    fig_typology.update_layout(xaxis_tickangle=-15)
-    st.plotly_chart(fig_typology, use_container_width=True)
+    fig_bar.update_layout(xaxis_tickangle=-15)
+    st.plotly_chart(fig_bar, use_container_width=True)
 
 with right:
-    fig_land_dist = px.histogram(
-        filtered,
-        x="LAND_KM2",
-        nbins=50,
-        title="Distribution of Land Area (km²) — Long-tail",
-        labels={"LAND_KM2": "Land Area (km²)"}
+    fig_cum = px.line(
+        size_counts,
+        x="Size Class",
+        y="Cumulative Share (%)",
+        markers=True,
+        title="Cumulative Share of Urban Areas by Size"
     )
-    st.plotly_chart(fig_land_dist, use_container_width=True)
+    fig_cum.update_yaxes(range=[0, 100])
+    st.plotly_chart(fig_cum, use_container_width=True)
 
 # -----------------------------
-# Section 3: UA vs UC comparative analytics
+# UA vs UC — violin + interpretation
 # -----------------------------
-st.subheader("UA vs UC Comparison")
+st.subheader("Urbanized Areas vs Urban Clusters")
 
-c1, c2 = st.columns([1, 1])
-
-with c1:
-    fig_box = px.box(
-        filtered,
-        x="URBAN_TYPE",
-        y="LAND_KM2",
-        points=False,
-        title="Land Area (km²) by Urban Type (UA vs UC)",
-        labels={"URBAN_TYPE": "", "LAND_KM2": "Land Area (km²)"}
-    )
-    # Log scale helps long-tail readability without hiding structure
-    fig_box.update_yaxes(type="log")
-    st.plotly_chart(fig_box, use_container_width=True)
-
-with c2:
-    summary_by_type = (
-        filtered.groupby("URBAN_TYPE", as_index=False)
-        .agg(
-            count=("NAME10", "count"),
-            mean_land_km2=("LAND_KM2", "mean"),
-            median_land_km2=("LAND_KM2", "median"),
-            mean_water_share=("WATER_SHARE_PCT", "mean")
-        )
-    )
-    fig_summary = px.bar(
-        summary_by_type,
-        x="URBAN_TYPE",
-        y="mean_land_km2",
-        title="Mean Land Area (km²) by Urban Type",
-        labels={"URBAN_TYPE": "", "mean_land_km2": "Mean land area (km²)"}
-    )
-    st.plotly_chart(fig_summary, use_container_width=True)
-
-st.dataframe(
-    summary_by_type.style.format({
-        "mean_land_km2": "{:,.1f}",
-        "median_land_km2": "{:,.1f}",
-        "mean_water_share": "{:.1f}%",
-    }),
-    use_container_width=True
+fig_violin = px.violin(
+    filtered,
+    x="URBAN_TYPE",
+    y="LAND_KM2",
+    box=True,
+    points=False,
+    log_y=True,
+    title="Distribution of Urban Land Area (log scale)"
 )
 
-# -----------------------------
-# Section 4: Outlier analysis (top 1%)
-# -----------------------------
-st.subheader("Outlier Analysis (Top 1% by Land Area)")
+st.plotly_chart(fig_violin, use_container_width=True)
 
-outliers_all = df[df["IS_OUTLIER_TOP1PCT"]].sort_values("LAND_KM2", ascending=False).copy()
-outliers_filtered = filtered[filtered["IS_OUTLIER_TOP1PCT"]].sort_values("LAND_KM2", ascending=False).copy()
-
-o1, o2 = st.columns([1, 1])
-
-with o1:
-    st.markdown("**Outliers across the full dataset**")
-    st.dataframe(
-        outliers_all.loc[:, ["NAME10", "URBAN_TYPE", "FUNCSTAT10", "LAND_KM2", "WATER_KM2", "WATER_SHARE_PCT", "SIZE_CLASS"]]
-        .head(20)
-        .style.format({
-            "LAND_KM2": "{:,.1f}",
-            "WATER_KM2": "{:,.1f}",
-            "WATER_SHARE_PCT": "{:.1f}%"
-        }),
-        use_container_width=True
+summary = (
+    filtered.groupby("URBAN_TYPE")
+    .agg(
+        count=("NAME10", "count"),
+        mean_land=("LAND_KM2", "mean"),
+        median_land=("LAND_KM2", "median")
     )
-
-with o2:
-    st.markdown("**Outliers within your current filter selection**")
-    if outliers_filtered.empty:
-        st.info("No outliers under current filters. Broaden filters or turn off 'Show only outliers'.")
-    else:
-        st.dataframe(
-            outliers_filtered.loc[:, ["NAME10", "URBAN_TYPE", "FUNCSTAT10", "LAND_KM2", "WATER_KM2", "WATER_SHARE_PCT", "SIZE_CLASS"]]
-            .head(20)
-            .style.format({
-                "LAND_KM2": "{:,.1f}",
-                "WATER_KM2": "{:,.1f}",
-                "WATER_SHARE_PCT": "{:.1f}%"
-            }),
-            use_container_width=True
-        )
-
-# -----------------------------
-# Section 5: Functional status storytelling
-# -----------------------------
-st.subheader("Functional Status (FUNCSTAT10)")
-
-fs_left, fs_right = st.columns([1, 1])
-
-func_counts = (
-    filtered["FUNCSTAT10"]
-    .astype(str)
-    .value_counts()
     .reset_index()
 )
-func_counts.columns = ["FUNCSTAT10", "COUNT"]
-
-with fs_left:
-    fig_fs = px.bar(
-        func_counts,
-        x="FUNCSTAT10",
-        y="COUNT",
-        title="Urban Areas by Functional Status",
-        labels={"FUNCSTAT10": "FUNCSTAT10", "COUNT": "Urban areas"}
-    )
-    st.plotly_chart(fig_fs, use_container_width=True)
-
-with fs_right:
-    func_means = (
-        filtered.groupby("FUNCSTAT10", as_index=False)
-        .agg(
-            count=("NAME10", "count"),
-            mean_land_km2=("LAND_KM2", "mean"),
-            mean_water_share=("WATER_SHARE_PCT", "mean")
-        )
-        .sort_values("mean_land_km2", ascending=False)
-    )
-
-    fig_fs_mean = px.bar(
-        func_means,
-        x="FUNCSTAT10",
-        y="mean_land_km2",
-        title="Mean Land Area (km²) by Functional Status",
-        labels={"FUNCSTAT10": "FUNCSTAT10", "mean_land_km2": "Mean land area (km²)"}
-    )
-    st.plotly_chart(fig_fs_mean, use_container_width=True)
 
 st.dataframe(
-    func_means.style.format({
-        "mean_land_km2": "{:,.1f}",
-        "mean_water_share": "{:.1f}%"
+    summary.style.format({
+        "mean_land": "{:.1f}",
+        "median_land": "{:.1f}"
     }),
     use_container_width=True
 )
 
-# -----------------------------
-# Appendix: Top table
-# -----------------------------
-st.subheader("Largest Urban Areas (Current Filters)")
-
-top_n = st.slider("Show top N", min_value=10, max_value=100, value=25, step=5)
-
-top_table = (
-    filtered.sort_values("LAND_KM2", ascending=False)
-    .loc[:, ["NAME10", "URBAN_TYPE", "FUNCSTAT10", "LAND_KM2", "WATER_KM2", "WATER_SHARE_PCT", "SIZE_CLASS"]]
-    .head(top_n)
+st.markdown(
+    """
+    **Interpretation:**  
+    Urbanized Areas are fewer in number but dominate total land coverage.
+    Urban Clusters are numerous but overwhelmingly small in spatial footprint.
+    """
 )
 
+# -----------------------------
+# OUTLIERS — ranked + spatial meaning
+# -----------------------------
+st.subheader("Extreme-Scale Urban Areas (Top 1%)")
+
+outliers = df[df["IS_OUTLIER"]].sort_values("LAND_KM2", ascending=False)
+
 st.dataframe(
-    top_table.style.format({
+    outliers[
+        ["NAME10", "URBAN_TYPE", "LAND_KM2", "WATER_SHARE_PCT"]
+    ].head(15).style.format({
         "LAND_KM2": "{:,.1f}",
-        "WATER_KM2": "{:,.1f}",
         "WATER_SHARE_PCT": "{:.1f}%"
     }),
     use_container_width=True
 )
 
+st.markdown(
+    """
+    These urban areas **dominate national urban land coverage** and
+    should be treated separately in planning, infrastructure, and policy analysis.
+    """
+)
+
+# -----------------------------
+# FOOTER
+# -----------------------------
 st.markdown("---")
 st.caption(
-    "Notes: Coordinates represent interior points for each urban area, not full boundaries. "
-    "Hexagon map aggregates urban areas spatially and weights by land area to reduce point clutter and surface spatial patterns."
+    "Data: United States Urban Areas Dataset (Homeland Infrastructure Foundation). "
+    "Coordinates represent interior reference points, not full urban boundaries."
 )
