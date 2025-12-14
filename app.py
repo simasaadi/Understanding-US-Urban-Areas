@@ -140,14 +140,16 @@ view_state = pdk.ViewState(
 
 st.pydeck_chart(
     pdk.Deck(
+        map_style="mapbox://styles/mapbox/light-v10",
         layers=[map_layer],
         initial_view_state=view_state,
         tooltip={
             "html": "<b>{NAME10}</b><br/>Land: {LAND_KM2:.1f} km²<br/>Water: {WATER_KM2:.1f} km²",
-            "style": {"color": "white"}
+            "style": {"color": "black"}
         }
     )
 )
+
 
 # --------------------------------------------------
 # Analytical charts
