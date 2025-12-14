@@ -122,7 +122,16 @@ c4.metric("Outlier Threshold (km²)", f"{p99:,.0f}")
 st.subheader("Spatial Structure of Urban Scale")
 st.caption("Hexagons are colored by the **dominant urban size class** within each cell.")
 
-filtered["COLOR"] = filtered["SIZE_CLASS"].map(SIZE_COLORS)
+# Make mapping robust (categorical-safe)
+filtered["SIZE_CLASS_STR"] = filtered["SIZE_CLASS"].astype(str)
+
+filtered["COLOR"] = filtered["SIZE_CLASS_STR"].map(SIZE_COLORS)
+
+# Fallback color if anything unexpected appears
+filtered["COLOR"] = filtered["COLOR"].apply(
+    lambda v: v if isinstance(v, (list, tuple)) and len(v) == 4 else [160, 160, 160, 140]
+)
+
 
 hex_layer = pdk.Layer(
     "HexagonLayer",
