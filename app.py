@@ -306,6 +306,33 @@ st.dataframe(
 )
 
 st.markdown("---")
+# ------------------------------------------------------------
+# FINAL DIAGNOSTIC: DISTRIBUTION SHAPE (BOXPLOT)
+# ------------------------------------------------------------
+st.subheader("Distribution Diagnostics: Variability of Urban Area Size")
+
+st.markdown(
+    "This boxplot summarizes the **full distribution** of urban land area for Urbanized Areas (UA) "
+    "and Urban Clusters (UC). A logarithmic scale is used to account for the strong right-skew "
+    "and the presence of extreme-scale urban areas."
+)
+
+fig_box = px.box(
+    filtered,
+    x="URBAN_TYPE",
+    y="LAND_KM2",
+    color="URBAN_TYPE",
+    points="outliers",
+    labels={
+        "URBAN_TYPE": "",
+        "LAND_KM2": "Land Area (km², log scale)"
+    }
+)
+
+fig_box.update_yaxes(type="log")
+fig_box.update_layout(showlegend=False)
+
+st.plotly_chart(fig_box, use_container_width=True)
 
 # ------------------------------------------------------------
 # 5) Functional status (don’t force charts if the data is single-class)
